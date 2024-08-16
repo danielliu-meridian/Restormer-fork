@@ -8,3 +8,7 @@
 *.npy
 .DS_Store
 
+.eggs/
+basicsr.egg-info/
+basicsr/
+
