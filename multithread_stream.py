@@ -1,21 +1,19 @@
-import os
-import sys
-import time
-
-from senxorplus.stark import STARKFilter
-from senxor.utils import data_to_frame, remap, connect_senxor
-from senxor.filters import RollingAverageFilter
-# from senxor.display import cv_render
-
-import torch
-# import torch.nn.functional as F
-# import torchvision.transforms.functional as TF
-from runpy import run_path
 import cv2
-# from tqdm import tqdm
-# import argparse
+import os
 import numpy as np
+import threading
+import queue
+import time
+import torch
+from runpy import run_path
 
+from senxor.utils import remap, data_to_frame, connect_senxor
+from senxor.display import cv_render
+from senxorplus.stark import STARKFilter
+from senxor.filters import RollingAverageFilter
+
+
+####
 def get_weights_and_parameters(task, parameters):
     if task == 'denoise':
         weights = os.path.join('Denoising', 'pretrained_models', 'gaussian_gray_denoising_blind.pth')
@@ -39,7 +37,10 @@ checkpoint = torch.load(weights, map_location=torch.device('cpu'))
 params = checkpoint['params']
 model.load_state_dict(params)
 model.eval()
+####
 
+
+####
 mi48 = connect_senxor()
 ncols, nrows = mi48.fpa_shape
 
@@ -77,15 +78,17 @@ scale = 2
 hflip = False
 
 mask = np.ones((nrows, ncols), dtype=bool)
+exit_flag = False
+####
 
-# cv2.namedWindow("Display")
+# Function to read frames from the camera
+def read_frames(mi48, queue):
+    while not exit_flag:
+        data, _ = mi48.read()
 
-with torch.no_grad():
-    while True:
-        data, header = mi48.read()
         if data is None:
             mi48.stop()
-            sys.exit(1)
+            break
 
         frame = data_to_frame(data, (ncols, nrows), hflip=hflip)
         corner_temp = frame[mask].mean()
@@ -100,29 +103,51 @@ with torch.no_grad():
         max_temp = maxav(np.median(np.sort(frame.flatten())[-5:]))
         frame = np.clip(frame, min_temp, max_temp)
 
-        # print(f"frame.shape: {frame.shape}")
-        input_ = np.expand_dims(remap(frame), axis=2)
-        input_ = torch.from_numpy(input_).float().div(255.).permute(2,0,1).unsqueeze(0)
-        # print(f"input_.shape: {input_.shape}")
-        start = time.time()
-        output_ = remap(model(input_).squeeze(0).squeeze(0).numpy())
-        end = time.time()
-        print(f"inference elapsed time: {end-start}")
+        if not queue.empty():
+            # Clear the queue if it already has a frame to keep only the latest frame
+            try:
+                _ = queue.get_nowait()
+            except queue.Empty:
+                pass
+
+        queue.put(frame)
+
+
+# Function to do inference on frames
+def infer_frames(queue):
+    while True:
+        frame = queue.get()
+        # Perform inference on the frame (replace this with your actual inference code)
+        with torch.no_grad():
+            input_ = np.expand_dims(remap(frame), axis=2)
+            input_ = torch.from_numpy(input_).float().div(255.).permute(2,0,1).unsqueeze(0)
+        
+        output_ = remap(model(input_).squeeze(0).squeeze(0).detach().numpy())
         output_ = np.dstack((output_, output_, output_))
-
-        cv2.imshow("Display", output_)
-
-
-        key = cv2.waitKey(1)  # & 0xFF
-        if key == ord("q"):
+        
+        # Display the predicted frame using cv2.imshow
+        cv2.imshow("Inference", cv2.resize(output_, dsize=None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC))
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            global exit_flag
+            exit_flag = True
             break
-        if key == ord("o"):
-            use_frame_offset = not use_frame_offset
-        if key == ord("0"):
-            show_frame_offset = not show_frame_offset
-        if key == ord("f"):
-            hflip = not hflip
 
-# stop capture and quit
+# Create a queue to store frames
+frame_queue = queue.Queue()
+
+# Create threads for reading frames and inference
+read_thread = threading.Thread(target=read_frames, args=(mi48, frame_queue))
+infer_thread = threading.Thread(target=infer_frames, args=(frame_queue,))
+
+# Start the threads
+read_thread.start()
+infer_thread.start()
+
+# Wait for the threads to finish
+read_thread.join()
+infer_thread.join()
+
+# Release the VideoCapture and close all OpenCV windows
 mi48.stop()
 cv2.destroyAllWindows()
