@@ -10,7 +10,6 @@ from senxor.filters import RollingAverageFilter
 import torch
 # import torch.nn.functional as F
 # import torchvision.transforms.functional as TF
-from runpy import run_path
 import cv2
 # from tqdm import tqdm
 # import argparse
@@ -18,27 +17,21 @@ import numpy as np
 
 import torch.nn.functional as F
 
-def get_weights_and_parameters(task, parameters):
-    if task == 'denoise':
-        weights = os.path.join('Denoising', 'pretrained_models', 'gaussian_gray_denoising_blind.pth')
-        parameters['LayerNorm_type'] =  'BiasFree'
-        return weights, parameters
-    else:
-        return None, None
+from restormer_model import get_weights_and_parameters
+from restormer_model import load_model
 
 
-# Get model weights and parameters
-parameters = {'inp_channels':1, 'out_channels':1, 'dim':48, 'num_blocks':[4,6,6,8], 'num_refinement_blocks':4, 'heads':[1,2,4,8], 'ffn_expansion_factor':2.66, 'bias':False, 'LayerNorm_type':'WithBias', 'dual_pixel_task':False}
-weights, parameters = get_weights_and_parameters("denoise", parameters)
+# set up some variables
+scale = 2
+task = "denoise" # task name
 
-load_arch = run_path(os.path.join('basicsr', 'models', 'archs', 'restormer_arch.py'))
-model = load_arch['Restormer'](**parameters)
+# Based on the task, get the weights and parameters
+weights, parameters = get_weights_and_parameters(task)
 
-checkpoint = torch.load(weights, map_location=torch.device('cpu'))
-params = checkpoint['params']
-model.load_state_dict(params)
-model.eval()
+# Load the model
+model = load_model(parameters, weights)
 
+# connect to the MI48 sensor
 mi48 = connect_senxor()
 ncols, nrows = mi48.fpa_shape
 
@@ -57,27 +50,7 @@ mi48.set_offset_corr(0.0)
 # initiate continuous frame acquisition
 time.sleep(1)
 with_header = True
-mi48.start(stream=True, with_header=with_header)
-
-minav = RollingAverageFilter(N=25)
-maxav = RollingAverageFilter(N=16)
-minav2 = RollingAverageFilter(N=25)
-maxav2 = RollingAverageFilter(N=16)
-
-stark_par = {'sigmoid': 'sigmoid',
-# 'variant': 'original',
-'lm_atype': 'ra',
-'lm_ks': (5,5),
-'lm_ad': 9,
-'alpha': 2.0,
-'beta': 2.0,}
-frame_filter = STARKFilter(stark_par)
-
-scale = 2
-hflip = False
-
-# cv2.namedWindow("Display")
-nrows += 2  # account for the padding 
+mi48.start(stream=True, with_header=with_header) 
 
 with torch.no_grad():
     while True:
@@ -85,6 +58,8 @@ with torch.no_grad():
         if data is None:
             mi48.stop()
             sys.exit(1)
+        print(f"header: {header}")
+        print(f"data.shape: {data.shape}")
 
         # img_multiple_of = 8
         # height,width = input_.shape[2], input_.shape[3]
@@ -94,8 +69,13 @@ with torch.no_grad():
         # input_ = F.pad(input_, (0,padw,0,padh), 'reflect')
         # print(f"resized_image.shape: {input_.shape}")
 
+        # Pad the input if not_multiple_of 8
+        # hstack the data to account for the padding
         padded = np.hstack([data[:80], data, data[-80:]])
-        frame = data_to_frame(padded, (ncols, nrows), hflip=hflip)
+        # convert the data to a frame
+        # account for the padding
+        frame = data_to_frame(padded, (ncols, nrows + 2))
+        # get the min and max temperature values in the frame
         min_temp = frame.min()
         max_temp = frame.max()
 
@@ -108,8 +88,19 @@ with torch.no_grad():
 
 
         # run the model and get the output
-        output = model(tensor).squeeze(0).squeeze(0).numpy()
-        output = remap(output, curr_range=(0,1), new_range=(min_temp, max_temp), to_uint8=False)
+
+        # the input type is tensor
+        # the input shape is (1, 1, x, x) for grayscale images and (1, 3, x, x) for RGB images
+        # the input dtype is float32
+        # the output type is tensor
+        # the output shape is (1, 1, x, x) for grayscale images and (1, 3, x, x) for RGB images
+        # the output dtype is float32
+
+        output_tensor = model(tensor); print('output_tensor shape', output_tensor.shape)
+        # convert the output tensor to a numpy array
+        output_arr = output_tensor.squeeze().numpy(); print('output_arr shape', output_arr.shape)
+        # remap the output to the original temperature range
+        output = remap(output_arr, curr_range=(0,1), new_range=(min_temp, max_temp), to_uint8=False)
         #output_ = np.dstack((output_, output_, output_))
 
         img_original = cv_render(remap(frame), resize=(ncols*scale, nrows*scale),
@@ -123,13 +114,7 @@ with torch.no_grad():
         key = cv2.waitKey(1)  # & 0xFF
         if key == ord("q"):
             break
-        if key == ord("o"):
-            use_frame_offset = not use_frame_offset
-        if key == ord("0"):
-            show_frame_offset = not show_frame_offset
-        if key == ord("f"):
-            hflip = not hflip
-
+        
 # stop capture and quit
 mi48.stop()
 cv2.destroyAllWindows()
