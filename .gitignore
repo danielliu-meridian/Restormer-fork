@@ -12,3 +12,5 @@
 basicsr.egg-info/
 basicsr/
 
+.conda/
+
