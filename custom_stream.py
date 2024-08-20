@@ -16,8 +16,6 @@ import cv2
 # import argparse
 import numpy as np
 
-import torch.nn.functional as F
-
 def get_weights_and_parameters(task, parameters):
     if task == 'denoise':
         weights = os.path.join('Denoising', 'pretrained_models', 'gaussian_gray_denoising_blind.pth')
@@ -88,46 +86,27 @@ with torch.no_grad():
             sys.exit(1)
 
         frame = data_to_frame(data, (ncols, nrows), hflip=hflip)
-        # corner_temp = frame[mask].mean()
-        # frame[mask==False] = corner_temp
+        corner_temp = frame[mask].mean()
+        frame[mask==False] = corner_temp
 
-        # rolling average filter
         min_temp = minav(np.median(np.sort(frame.flatten())[:16]))
         max_temp = maxav(np.median(np.sort(frame.flatten())[-5:]))
         frame = np.clip(frame, min_temp, max_temp)
-        # STARK filter
+
         frame = frame_filter(frame)
-        # rolling average filter
         min_temp = minav(np.median(np.sort(frame.flatten())[:9]))
         max_temp = maxav(np.median(np.sort(frame.flatten())[-5:]))
         frame = np.clip(frame, min_temp, max_temp)
-        # print(f"frame.shape: {frame.shape}")
 
-        # convert the frame to a tensor
+        # print(f"frame.shape: {frame.shape}")
         input_ = np.expand_dims(remap(frame), axis=2)
         input_ = torch.from_numpy(input_).float().div(255.).permute(2,0,1).unsqueeze(0)
-        print(f"input_.shape: {input_.shape}")
-
-        # resize the input image to a size that is divisible by 2
-        # Pad the input if not_multiple_of 8
-        img_multiple_of = 8
-        height,width = input_.shape[2], input_.shape[3]
-        H,W = ((height+img_multiple_of)//img_multiple_of)*img_multiple_of, ((width+img_multiple_of)//img_multiple_of)*img_multiple_of
-        padh = H-height if height%img_multiple_of!=0 else 0
-        padw = W-width if width%img_multiple_of!=0 else 0
-        input_ = F.pad(input_, (0,padw,0,padh), 'reflect')
-        print(f"resized_image.shape: {input_.shape}")
-
-        # run the model and get the output
+        # print(f"input_.shape: {input_.shape}")
         output_ = remap(model(input_).squeeze(0).squeeze(0).numpy())
         output_ = np.dstack((output_, output_, output_))
 
-        # resize the output image
-        scale = 5
-        output_ = cv2.resize(output_, (ncols*scale, nrows*scale), interpolation=cv2.INTER_NEAREST_EXACT)
-        frame = cv2.resize(remap(frame), (ncols*scale, nrows*scale), interpolation=cv2.INTER_NEAREST_EXACT)
         cv2.imshow("Display", output_)
-        cv2.imshow("Original", frame)
+
 
         key = cv2.waitKey(1)  # & 0xFF
         if key == ord("q"):
